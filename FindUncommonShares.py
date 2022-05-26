@@ -100,6 +100,7 @@ def parse_args():
     parser.add_argument("-no-colors", dest="colors", action="store_false", default=True, help="Disables colored output mode")
     parser.add_argument("-I", "--ignore-hidden-shares", dest="ignore_hidden_shares", action="store_true", default=False, help="Ignores hidden shares (shares ending with $)")
     parser.add_argument("-t", "--threads", dest="threads", action="store", type=int, default=20, required=False, help="Number of threads (default: 20)")
+    parser.add_argument("--force-no-dns", default=False, action="store_true", help="Prevent dns lookup for FQDN names")
 
     output = parser.add_argument_group('output files')
     output.add_argument("--xlsx", dest="xlsx", type=str, default=None, required=False, help="Output file to store the results in. (default: shares.xlsx)")
@@ -360,8 +361,8 @@ def init_logger(args):
         logging.getLogger('impacket.smbserver').setLevel(logging.ERROR)
 
 
-def init_smb_session(args, target_ip, domain, username, password, address, lmhash, nthash, port=445):
-    smbClient = SMBConnection(address, target_ip, sess_port=int(port))
+def init_smb_session(args, target, domain, username, password, address, lmhash, nthash, port=445):
+    smbClient = SMBConnection(address, target, sess_port=int(port))
     dialect = smbClient.getDialect()
     if dialect == SMB_DIALECT:
         logging.debug("SMBv1 dialect used")
@@ -383,86 +384,89 @@ def init_smb_session(args, target_ip, domain, username, password, address, lmhas
 
 
 def worker(args, target_name, domain, username, password, address, lmhash, nthash, results, lock):
-    target_ip = nslookup.Nslookup(dns_servers=[args.dc_ip], verbose=args.debug).dns_lookup(target_name).answer
-    if len(target_ip) != 0:
-        target_ip = target_ip[0]
-        try:
-            smbClient = init_smb_session(args, target_ip, domain, username, password, address, lmhash, nthash)
-            resp = smbClient.listShares()
-            for share in resp:
-                # SHARE_INFO_1 structure (lmshare.h)
-                # https://docs.microsoft.com/en-us/windows/win32/api/lmshare/ns-lmshare-share_info_1
-                sharename = share['shi1_netname'][:-1]
-                sharecomment = share['shi1_remark'][:-1]
-                sharetype = share['shi1_type']
+    if args.force_no_dns:
+        target = target_name
+    else:
+        target_ip = nslookup.Nslookup(dns_servers=[args.dc_ip], verbose=args.debug).dns_lookup(target_name).answer
+        if len(target_ip) != 0:
+            target = target_ip[0]
+    try:
+        smbClient = init_smb_session(args, target, domain, username, password, address, lmhash, nthash)
+        resp = smbClient.listShares()
+        for share in resp:
+            # SHARE_INFO_1 structure (lmshare.h)
+            # https://docs.microsoft.com/en-us/windows/win32/api/lmshare/ns-lmshare-share_info_1
+            sharename = share['shi1_netname'][:-1]
+            sharecomment = share['shi1_remark'][:-1]
+            sharetype = share['shi1_type']
 
-                lock.acquire()
-                if target_name not in results.keys():
-                    results[target_name] = []
-                results[target_name].append(
-                    {
-                        "share": sharename,
-                        "computer": target_name,
-                        "hidden": (True if sharename.endswith('$') else False),
-                        "uncpath": "\\".join(['', '', target_ip, sharename, '']),
-                        "comment": sharecomment,
-                        "type": {
-                            "stype_value": sharetype,
-                            "stype_flags": STYPE_MASK(sharetype)
-                        }
+            lock.acquire()
+            if target_name not in results.keys():
+                results[target_name] = []
+            results[target_name].append(
+                {
+                    "share": sharename,
+                    "computer": target_name,
+                    "hidden": (True if sharename.endswith('$') else False),
+                    "uncpath": "\\".join(['', '', target, sharename, '']),
+                    "comment": sharecomment,
+                    "type": {
+                        "stype_value": sharetype,
+                        "stype_flags": STYPE_MASK(sharetype)
                     }
-                )
-                lock.release()
+                }
+            )
+            lock.release()
 
-                if sharename not in COMMON_SHARES:
-                    if not args.quiet:
-                        if len(sharecomment) != 0:
-                            if args.colors:
-                                if sharename.endswith('$'):
-                                    if not args.ignore_hidden_shares:
-                                        print("[>] Found '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
-                                else:
-                                    print("[>] Found '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
-                            else:
-                                print("[>] Found '%s' on '%s' (comment: '%s')" % (sharename, address, sharecomment))
-                        else:
-                            if args.colors:
-                                if sharename.endswith('$'):
-                                    if not args.ignore_hidden_shares:
-                                        print("[>] Found '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
-                                else:
-                                    print("[>] Found '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
-                            else:
-                                if sharename.endswith('$'):
-                                    if not args.ignore_hidden_shares:
-                                        print("[>] Found '%s' on '%s'" % (sharename, address))
-                                else:
-                                    print("[>] Found '%s' on '%s'" % (sharename, address))
-                elif args.debug and not args.quiet:
+            if sharename not in COMMON_SHARES:
+                if not args.quiet:
                     if len(sharecomment) != 0:
                         if args.colors:
-                            if sharename.endswith('$') and not args.ignore_hidden_shares:
-                                print("[>] Skipping common share '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
+                            if sharename.endswith('$'):
+                                if not args.ignore_hidden_shares:
+                                    print("[>] Found '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
                             else:
-                                print("[>] Skipping common share '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
+                                print("[>] Found '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
                         else:
-                            print("[>] Skipping common share '%s' on '%s' (comment: '%s')" % (sharename, address, sharecomment))
+                            print("[>] Found '%s' on '%s' (comment: '%s')" % (sharename, address, sharecomment))
                     else:
                         if args.colors:
-                            if sharename.endswith('$') and not args.ignore_hidden_shares:
-                                print("[>] Skipping common share '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
+                            if sharename.endswith('$'):
+                                if not args.ignore_hidden_shares:
+                                    print("[>] Found '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
                             else:
-                                print("[>] Skipping common share '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
+                                print("[>] Found '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
                         else:
                             if sharename.endswith('$'):
                                 if not args.ignore_hidden_shares:
-                                    print("[>] Skipping common share '%s' on '%s'" % (sharename, address))
+                                    print("[>] Found '%s' on '%s'" % (sharename, address))
                             else:
+                                print("[>] Found '%s' on '%s'" % (sharename, address))
+            elif args.debug and not args.quiet:
+                if len(sharecomment) != 0:
+                    if args.colors:
+                        if sharename.endswith('$') and not args.ignore_hidden_shares:
+                            print("[>] Skipping common share '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
+                        else:
+                            print("[>] Skipping common share '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m' (comment: '\x1b[95m%s\x1b[0m')" % (sharename, address, sharecomment))
+                    else:
+                        print("[>] Skipping common share '%s' on '%s' (comment: '%s')" % (sharename, address, sharecomment))
+                else:
+                    if args.colors:
+                        if sharename.endswith('$') and not args.ignore_hidden_shares:
+                            print("[>] Skipping common share '\x1b[94m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
+                        else:
+                            print("[>] Skipping common share '\x1b[93m%s\x1b[0m' on '\x1b[96m%s\x1b[0m'" % (sharename, address))
+                    else:
+                        if sharename.endswith('$'):
+                            if not args.ignore_hidden_shares:
                                 print("[>] Skipping common share '%s' on '%s'" % (sharename, address))
+                        else:
+                            print("[>] Skipping common share '%s' on '%s'" % (sharename, address))
 
-        except Exception as e:
-            if args.debug:
-                print(e)
+    except Exception as e:
+        if args.debug:
+            print(e)
 
 
 if __name__ == '__main__':

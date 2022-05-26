@@ -44,6 +44,7 @@ options:
                         Ignores hidden shares (shares ending with $)
   -t THREADS, --threads THREADS
                         Number of threads (default: 20)
+  --force-no-dns        Prevent dns lookup for FQDN names                      
 
 output files:
   --xlsx XLSX           Output file to store the results in. (default: shares.xlsx)
