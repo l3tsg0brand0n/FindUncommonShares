@@ -113,6 +113,7 @@ def parse_args():
     secret = parser.add_argument_group()
     cred = secret.add_mutually_exclusive_group()
     cred.add_argument("--no-pass", default=False, action="store_true", help="Don't ask for password (useful for -k)")
+    cred.add_argument("--force-no-dns", default=False, action="store_true", help="sMBConnection via hostname instead of ip address with dns resolve")
     cred.add_argument("-p", "--password", dest="auth_password", metavar="PASSWORD", action="store", help="Password to authenticate with")
     cred.add_argument("-H", "--hashes", dest="auth_hashes", action="store", metavar="[LMHASH:]NTHASH", help='NT/LM hashes, format is LMhash:NThash')
     cred.add_argument("--aes-key", dest="auth_key", action="store", metavar="hex key", help='AES key to use for Kerberos Authentication (128 or 256 bits)')
@@ -360,8 +361,8 @@ def init_logger(args):
         logging.getLogger('impacket.smbserver').setLevel(logging.ERROR)
 
 
-def init_smb_session(args, target_ip, domain, username, password, address, lmhash, nthash, port=445):
-    smbClient = SMBConnection(address, target_ip, sess_port=int(port))
+def init_smb_session(args, target, domain, username, password, address, lmhash, nthash, port=445):
+    smbClient = SMBConnection(address, target, sess_port=int(port))
     dialect = smbClient.getDialect()
     if dialect == SMB_DIALECT:
         logging.debug("SMBv1 dialect used")
@@ -383,11 +384,14 @@ def init_smb_session(args, target_ip, domain, username, password, address, lmhas
 
 
 def worker(args, target_name, domain, username, password, address, lmhash, nthash, results, lock):
-    target_ip = nslookup.Nslookup(dns_servers=[args.dc_ip], verbose=args.debug).dns_lookup(target_name).answer
-    if len(target_ip) != 0:
-        target_ip = target_ip[0]
+    if args.force_no_dns:
+        target = target_name
+    else:
+        target_ip = nslookup.Nslookup(dns_servers=[args.dc_ip], verbose=args.debug).dns_lookup(target_name).answer
+        if len(target_ip) != 0:
+            target = target_ip[0]
         try:
-            smbClient = init_smb_session(args, target_ip, domain, username, password, address, lmhash, nthash)
+            smbClient = init_smb_session(args, target, domain, username, password, address, lmhash, nthash)
             resp = smbClient.listShares()
             for share in resp:
                 # SHARE_INFO_1 structure (lmshare.h)
@@ -404,7 +408,7 @@ def worker(args, target_name, domain, username, password, address, lmhash, nthas
                         "share": sharename,
                         "computer": target_name,
                         "hidden": (True if sharename.endswith('$') else False),
-                        "uncpath": "\\".join(['', '', target_ip, sharename, '']),
+                        "uncpath": "\\".join(['', '', target, sharename, '']),
                         "comment": sharecomment,
                         "type": {
                             "stype_value": sharetype,
